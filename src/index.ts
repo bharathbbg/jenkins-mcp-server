@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import express from "express";
 import { z } from "zod";
 import axios from "axios";
 import dotenv from "dotenv";
@@ -10,9 +12,18 @@ dotenv.config();
 const JENKINS_URL = process.env.JENKINS_URL;
 const JENKINS_USER = process.env.JENKINS_USER;
 const JENKINS_TOKEN = process.env.JENKINS_TOKEN;
+const TRANSPORT = process.env.TRANSPORT || "stdio";
+const PORT = parseInt(process.env.PORT || "3000");
 
-if (!JENKINS_URL || !JENKINS_TOKEN) {
-  console.error("Missing JENKINS_URL or JENKINS_TOKEN environment variables");
+if (!JENKINS_URL) {
+  console.error("❌ Error: JENKINS_URL environment variable is missing.");
+}
+if (!JENKINS_TOKEN) {
+  console.error("❌ Error: JENKINS_TOKEN environment variable is missing.");
+}
+if (JENKINS_URL && JENKINS_TOKEN) {
+  console.error(`✅ Jenkins MCP Server initialized for URL: ${JENKINS_URL}`);
+  console.error(`✅ Authentication: ${JENKINS_USER ? 'Basic (User+Token)' : 'Bearer Token'}`);
 }
 
 // Create axios instance for Jenkins API
@@ -26,6 +37,20 @@ const jenkinsApi = axios.create({
     'Authorization': `Bearer ${JENKINS_TOKEN}`
   } : {}
 });
+
+/**
+ * Helper: Fetch Jenkins Crumb for CSRF protection
+ */
+async function getCrumbHeaders(): Promise<Record<string, string>> {
+  try {
+    const response = await jenkinsApi.get("/crumbIssuer/api/json");
+    const { crumb, crumbRequestField } = response.data;
+    return { [crumbRequestField]: crumb };
+  } catch (error) {
+    // Crumb might be disabled on some Jenkins instances
+    return {};
+  }
+}
 
 // Initialize the industrial-grade MCP server
 const server = new McpServer({
@@ -70,6 +95,127 @@ server.tool(
 
       return {
         content: [{ type: "text", text: `Error fetching jobs from Jenkins: ${errorMessage}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+/**
+ * TOOL: search_jobs
+ * Purpose: Search for jobs by name pattern.
+ */
+server.tool(
+  "search_jobs",
+  "Search for jobs by name pattern",
+  {
+    pattern: z.string().describe("Part of the job name to search for (e.g., 'prod' or 'backend')")
+  },
+  async ({ pattern }) => {
+    try {
+      const response = await jenkinsApi.get("/api/json?tree=jobs[name,url,color]");
+      const jobs = response.data.jobs || [];
+      const filtered = jobs.filter((job: any) =>
+        job.name.toLowerCase().includes(pattern.toLowerCase())
+      );
+
+      if (filtered.length === 0) {
+        return {
+          content: [{ type: "text", text: `No jobs found matching pattern: ${pattern}` }]
+        };
+      }
+
+      const jobsText = filtered.map((job: any) =>
+        `- ${job.name} (${job.color}): ${job.url}`
+      ).join("\n");
+
+      return {
+        content: [{ type: "text", text: `Search Results for "${pattern}":\n${jobsText}` }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error searching jobs: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+/**
+ * TOOL: get_job_info
+ * Purpose: Get detailed information about a job.
+ */
+server.tool(
+  "get_job_info",
+  "Get detailed configuration and build summary for a job",
+  {
+    jobName: z.string().describe("The name of the Jenkins job")
+  },
+  async ({ jobName }) => {
+    try {
+      const response = await jenkinsApi.get(`/job/${jobName}/api/json`);
+      const data = response.data;
+
+      const paramsData = (data.property || []).find((p: any) => p._class === "hudson.model.ParametersDefinitionProperty");
+      const params = paramsData?.parameterDefinitions || [];
+      const paramSummary = params.length > 0 ?
+        `Parameters:\n${params.map((p: any) => `  - ${p.name} (${p.type}): ${p.description || "No description"}`).join("\n")}` :
+        "Parameters: None";
+
+      const summary = [
+        `Name: ${data.name}`,
+        `Description: ${data.description || "No description"}`,
+        `Latest Build: #${data.lastBuild?.number || "None"}`,
+        `Last Successful: #${data.lastSuccessfulBuild?.number || "None"}`,
+        `Last Failed: #${data.lastFailedBuild?.number || "None"}`,
+        paramSummary,
+        `URL: ${data.url}`
+      ].join("\n");
+
+      return {
+        content: [{ type: "text", text: `Job Information: ${jobName}\n\n${summary}` }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error fetching job info for ${jobName}: ${error.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+/**
+ * TOOL: list_builds
+ * Purpose: List recent builds for a specific job.
+ */
+server.tool(
+  "list_builds",
+  "List recent builds for a specific Jenkins job",
+  {
+    jobName: z.string().describe("The name of the Jenkins job"),
+    limit: z.number().optional().default(10).describe("Number of builds to return (default 10)")
+  },
+  async ({ jobName, limit }) => {
+    try {
+      const response = await jenkinsApi.get(`/job/${jobName}/api/json?tree=builds[number,url,result,timestamp]{0,${limit}}`);
+      const builds = response.data.builds || [];
+
+      if (builds.length === 0) {
+        return {
+          content: [{ type: "text", text: `No builds found for job: ${jobName}` }]
+        };
+      }
+
+      const buildList = builds.map((b: any) =>
+        `#${b.number} - Result: ${b.result || "IN PROGRESS"} (${new Date(b.timestamp).toLocaleString()})`
+      ).join("\n");
+
+      return {
+        content: [{ type: "text", text: `Recent Builds for ${jobName}:\n${buildList}` }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `Error listing builds for ${jobName}: ${error.message}` }],
         isError: true
       };
     }
@@ -145,7 +291,11 @@ server.tool(
 
     try {
       const endpoint = parameters ? `/job/${jobName}/buildWithParameters` : `/job/${jobName}/build`;
-      const response = await jenkinsApi.post(endpoint, null, { params: parameters });
+      const crumbHeaders = await getCrumbHeaders();
+      const response = await jenkinsApi.post(endpoint, null, {
+        params: parameters,
+        headers: crumbHeaders
+      });
 
       // Jenkins usually returns 201 Created on success
       const statusText = response.status === 201 ? "Build triggered successfully." : "Trigger request sent.";
@@ -192,7 +342,10 @@ server.tool(
     }
 
     try {
-      await jenkinsApi.post(`/job/${jobName}/${buildId}/stop`);
+      const crumbHeaders = await getCrumbHeaders();
+      await jenkinsApi.post(`/job/${jobName}/${buildId}/stop`, null, {
+        headers: crumbHeaders
+      });
 
       return {
         content: [{
@@ -221,10 +374,6 @@ server.resource(
   "console_logs",
   "jenkins://{job}/logs/{id}",
   async (uri) => {
-    const url = new URL(uri.href);
-    const pathParts = url.pathname.split('/').filter(Boolean);
-    // For jenkins://job-name/logs/123, pathname might be interpreted differently depending on how URL handles custom schemes
-    // Let's use a regex instead for reliable extraction
     const match = uri.href.match(/^jenkins:\/\/([^/]+)\/logs\/([^/]+)$/);
     if (!match) {
       throw new Error(`Invalid URI: ${uri.href}. Expected format: jenkins://{job}/logs/{id}`);
@@ -269,11 +418,34 @@ Look for stack traces, compilation errors, or environment issues that might have
   })
 );
 
-// Start the server using stdio transport
+// Start the server using the selected transport
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Jenkins MCP Server running on stdio");
+  if (TRANSPORT === "sse") {
+    const app = express();
+    let transport: SSEServerTransport | null = null;
+
+    app.get("/sse", async (req, res) => {
+      transport = new SSEServerTransport("/messages", res);
+      await server.connect(transport);
+      console.error(`New SSE connection established`);
+    });
+
+    app.post("/messages", async (req, res) => {
+      if (transport) {
+        await transport.handlePostMessage(req, res);
+      } else {
+        res.status(400).send("No active SSE session");
+      }
+    });
+
+    app.listen(PORT, () => {
+      console.error(`Jenkins MCP Server running on SSE at http://localhost:${PORT}`);
+    });
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("Jenkins MCP Server running on stdio");
+  }
 }
 
 main().catch((error) => {

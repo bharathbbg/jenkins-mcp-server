@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  jenkins:
+    image: jenkins/jenkins:lts
+    container_name: jenkins-mcp-demo
+    ports:
+      - "8081:8080" # Mapping to 8081 to avoid conflict with your current local Jenkins on 8080
+      - "50001:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  jenkins-mcp:
+    build: .
+    container_name: jenkins-mcp-server
+    depends_on:
+      jenkins:
+        condition: service_healthy
+    environment:
+      - JENKINS_URL=http://jenkins:8080
+      - JENKINS_USER=admin
+      # You would still need to provide the token here after manual setup
+      - JENKINS_TOKEN=${JENKINS_TOKEN}
+    ports:
+      - "3000:3000" # Reserved for SSE transport later
+    restart: unless-stopped
+
+volumes:
+  jenkins_home:
