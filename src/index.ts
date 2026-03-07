@@ -241,12 +241,19 @@ server.tool(
       const duration = data.duration ? `${(data.duration / 1000).toFixed(2)}s` : "N/A";
       const timestamp = new Date(data.timestamp).toLocaleString();
 
+      // Extract commit information
+      const changes = data.changeSet?.items || [];
+      const changeSummary = changes.length > 0
+        ? `\nChanges:\n${changes.map((c: any) => `  - [${c.author.fullName}] ${c.msg}`).join("\n")}`
+        : "\nChanges: No commits in this build.";
+
       const summary = [
         `Job: ${jobName}`,
         `Build: #${data.number}`,
         `Result: ${data.result || "IN PROGRESS"}`,
         `Timestamp: ${timestamp}`,
         `Duration: ${duration}`,
+        changeSummary,
         `URL: ${data.url}`
       ].join("\n");
 
