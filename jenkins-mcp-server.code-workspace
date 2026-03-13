@@ -5,6 +5,12 @@
 		},
 		{
 			"path": "../jenkins-mcp-client"
+		},
+		{
+			"path": "../jenkins_java/jenkins_mcp_client_java"
+		},
+		{
+			"path": "../jenkins_java/jenkins_mcp_server_java"
 		}
 	],
 	"settings": {}
